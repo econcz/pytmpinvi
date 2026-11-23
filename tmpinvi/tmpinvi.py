@@ -70,12 +70,24 @@ class TMPinviResult:
         supplied in `tmpinvi()`, `data` contains `ival` with missing entries
         replaced by fitted values from `x`. Otherwise, data contains the fitted
         solution matrix `x`.
+
+    replaced : np.ndarray
+        Boolean mask of shape (m, p) of the cells of `x` set to
+        `replace_value` in `tmpinv()` (all False if none).
+
+    sweeps : int or None
+        Number of block sweeps in the reduced model (None in the full
+        model).
     """
     def __init__(self, result, data: np.ndarray):
-        self.full  = result.full
-        self.model = result.model
-        self.x     = np.asarray(result.x, dtype=np.float64)
-        self.data  = data
+        self.full     = result.full
+        self.model    = result.model
+        self.x        = np.asarray(result.x, dtype=np.float64)
+        self.data     = data
+        self.replaced = (np.zeros(self.x.shape, dtype=bool)
+                         if getattr(result, "replaced", None) is None
+                         else np.asarray(result.replaced, dtype=bool))
+        self.sweeps   = getattr(result, "sweeps", None)
 
     def summarize(self, i: int | None = None, display : bool = False):
         return self.summary(i=i, display=display)
@@ -86,7 +98,9 @@ class TMPinviResult:
 
         Parameters
         ----------
-        display: bool, default = False
+        i : int or None, default = None
+            Index of a reduced-block model in `model` (reduced model only).
+        display : bool, default = False
             If True, prints the summary instead of returning a dictionary.
         """
         if not isinstance(self.model, list):
@@ -102,7 +116,7 @@ class TMPinviResult:
 
 def tmpinvi(
     ival:           Any                                       = None,
-    ibounds:        Any                                       = None,
+    ibounds:        Any | Callable[[np.ndarray | None], Any]  = None,
     preestimation:  Callable[[np.ndarray | None], Any] | None = None,
     postestimation: Callable[...,                 Any] | None = None,
     update:         bool                                      = False,
@@ -110,7 +124,7 @@ def tmpinvi(
 ) -> TMPinviResult:
     """
     Solve an interactive tabular matrix estimation problem via Convex Least
-    Squares Programming (CLSP) with bound-constrained iterative refinement.
+    Squares Programming (CLSP) with exactly enforced cell-value bounds.
 
     Parameters
     ----------
@@ -121,15 +135,21 @@ def tmpinvi(
         entries (np.nan) are ignored. If all entries of `ival` are np.nan, no
         prior information is used and `b_val` and `M` are not passed to
         `tmpinv()`. When `ival` is provided, it overrides any `b_val` or `M`
-        arguments supplied through keyword arguments.
-    ibounds : tuple, list, or None, default = None
+        arguments supplied through keyword arguments. The known values are
+        least-squares rows, like the totals. `ival` must have the shape of
+        the table (m, p) and must not contain inf.
+    ibounds : tuple, list, np.ndarray, callable, or None, default = None
         Dynamic cell-value bounds passed to `tmpinv(bounds=...)`. The object
         supplied to `ibounds` may be created or modified programmatically
         (for example within `preestimation()`). If a single pair such as (low,
         high) is provided, it is applied uniformly to all cells. Alternatively,
-        a list of pairs may be supplied to specify cell-specific bounds with
-        others set to None or np.nan. When `ibounds` is not None, it overrides
-        any `bounds` argument supplied through keyword arguments.
+        a list of m * p pairs (row-major) or an array of shape (m * p, 2) may
+        be supplied to specify cell-specific bounds; None, np.nan and
+        ±np.inf denote an unbounded side, low = high fixes a cell. If
+        callable, it is called as `ibounds(ival)` after `preestimation()`,
+        and its return value is used as the bounds. The bounds are enforced
+        exactly by CLSP. When `ibounds` is not None, it overrides any
+        `bounds` argument supplied through keyword arguments.
     preestimation : callable or None, default = None
         A function executed prior to model estimation. If supplied, it is
         called as `preestimation(ival)` and may perform arbitrary preparatory
@@ -139,21 +159,30 @@ def tmpinvi(
         A function executed after model estimation. For a full model, it is
         called as `postestimation(model)`. For reduced (block-wise) models,
         it is called as `postestimation(model_i, i)` for each block index
-        `i`. The return value is ignored.
+        `i` (block fits of the last sweep). The model is the fitted CLSP
+        object (with `x`, `status`, `rho`, `residual`, `fixed`, ...),
+        before the symmetrization and the replacement of `tmpinv()`. The
+        return value is ignored.
     update : bool, default = False
         If True and `ival` is supplied, missing entries (np.nan) in `ival`
         are replaced by the corresponding fitted values from `result.x`. The
         updated matrix is returned in the `result.data` component. If False,
         the data component contains the fitted solution matrix `result.x`.
+        Cells set to `replace_value` in `result.x` are carried into
+        `result.data` only where `ival` is missing.
     *args, **kwargs : additional arguments
-        Passed directly to tmpinv().
+        Passed directly to tmpinv() and CLSP (e.g., b_row, b_col, S, i, j,
+        zero_diagonal, reduced, sweep_limit, symmetric, replace_value,
+        tolerance, iteration_limit, r, Z, rcond, final, alpha, scale,
+        slack_sign, and CVXPY solver arguments).
 
     Returns
     -------
     TMPinviResult
         An object containing the fitted CLSP model(s), the solution matrix `x`,
-        and the processed matrix `data`. If `update=True` and `ival` is
-        supplied, `data` contains `ival` with missing entries replaced by
+        the mask `replaced`, the number of block sweeps `sweeps` (reduced
+        model), and the processed matrix `data`. If `update=True` and `ival`
+        is supplied, `data` contains `ival` with missing entries replaced by
         fitted values from `x`. Otherwise, data contains the fitted solution
         matrix `x`.
     """
@@ -162,6 +191,14 @@ def tmpinvi(
         ival = np.asarray(ival, dtype=np.float64)
         if  ival.ndim  != 2:
             raise TMPinviInputError("ival must be a 2D array.")
+        if  np.isinf(ival).any():
+            raise TMPinviInputError("ival must not contain inf.")
+        if  (kwargs.get("b_row") is not None and
+             kwargs.get("b_col") is not None and
+             ival.shape != (len(kwargs["b_row"]) * kwargs.get("i", 1),
+                            len(kwargs["b_col"]) * kwargs.get("j", 1))):
+            raise TMPinviInputError("Dimensions of ival and the table "
+                                    "(b_row, b_col, i, j) do not match.")
         kwargs.pop("b_val",     None)
         kwargs.pop("M",         None)
     if  ibounds          is not None:
@@ -182,6 +219,10 @@ def tmpinvi(
             idx             = ~np.isnan(b_raw)
             kwargs["b_val"] = b_raw[idx].reshape(-1, 1)
             kwargs["M"]     = np.eye(b_raw.size, dtype=np.float64)[idx]
+
+    # construct dynamic bounds
+    if  callable(ibounds):
+        ibounds             = ibounds(ival)
 
     # perform estimation
     if  ibounds          is not None:

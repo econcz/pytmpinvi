@@ -1,9 +1,9 @@
 [project]
 name = "pytmpinvi"
-version = "4.0.0"
+version = "5.0.0"
 description = "Interactive Tabular Matrix Problems via Pseudoinverse Estimation"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -18,16 +18,16 @@ keywords = [
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
   "Topic :: Scientific/Engineering :: Mathematics",
   "Topic :: Scientific/Engineering :: Information Analysis"
 ]
 dependencies = [
   "numpy>=1.24",
-  "pytmpinv>=4.0.0"
+  "pytmpinv>=5.0.0"
 ]
 
 [project.urls]
